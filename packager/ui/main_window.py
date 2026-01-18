@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QMessageBox,
 )
+from packager.core.scanner import scan_folder
 
 
 class MainWindow(QMainWindow):
@@ -131,12 +132,21 @@ class MainWindow(QMainWindow):
 
     def add_result(self, level: str, message: str):
         """
-        Day 1 placeholder result item.
-        Later we'll color-code severity properly.
+        Adds a result item with basic severity coloring.
         """
         text = f"[{level}] {message}"
         item = QListWidgetItem(text)
+
+        lvl = level.upper().strip()
+        if lvl == "ERROR":
+            item.setForeground(Qt.red)
+        elif lvl == "WARNING":
+            item.setForeground(Qt.darkYellow)
+        else:
+            item.setForeground(Qt.darkGreen)
+
         self.results_list.addItem(item)
+
 
     def pick_input_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
@@ -173,14 +183,52 @@ class MainWindow(QMainWindow):
         self.log(f"Input:   {input_path}")
         self.log(f"Output:  {output_path}")
 
-        # Day 1 = just confirm selections
-        self.add_result("INFO", f"Input folder OK: {input_path}")
-        self.add_result("INFO", f"Output folder OK: {output_path}")
-        self.add_result("INFO", f"Profile selected: {profile}")
-        self.add_result("INFO", "Scanner not implemented yet (Day 2).")
+        # Day 2: real scan
+        ignore_dirs = {".git", "__pycache__", ".venv", "node_modules"}
+        try:
+            files, summary = scan_folder(
+                input_path,
+                ignore_dirs=ignore_dirs,
+                ignore_hidden=True,
+                follow_symlinks=False,
+            )
+        except Exception as e:
+            self.add_result("ERROR", f"Scan failed: {e}")
+            self.log(f"ERROR: {e}")
+            return
 
+        # Header results
+        mb = summary.total_bytes / (1024 * 1024) if summary.total_bytes else 0.0
+        self.add_result("INFO", f"Scan OK: {summary.total_files} files in {summary.total_dirs} folders ({mb:.2f} MB)")
+        self.add_result("INFO", f"Unique extensions: {len(summary.extensions)}")
+
+        # Extensions list (top 12)
+        self.add_result("INFO", "Top extensions:")
+        shown = 0
+        for ext, count in summary.extensions.items():
+            if shown >= 12:
+                remaining = len(summary.extensions) - shown
+                if remaining > 0:
+                    self.add_result("INFO", f"... +{remaining} more")
+                break
+            label = ext if ext else "(no_ext)"
+            self.add_result("INFO", f"  - {label}: {count}")
+            shown += 1
+
+        # Unsupported warning bucket
+        if summary.unsupported:
+            self.add_result("WARNING", "Unsupported / suspicious types found:")
+            for ext, count in list(summary.unsupported.items())[:12]:
+                self.add_result("WARNING", f"  - {ext}: {count}")
+            if len(summary.unsupported) > 12:
+                self.add_result("WARNING", f"... +{len(summary.unsupported) - 12} more")
+        else:
+            self.add_result("INFO", "No unsupported extensions detected (allowlist-based).")
+
+        self.log(f"Scanned {len(files)} files.")
         self.log("---- SCAN DONE ----")
 
         # Enable next buttons later
         self.btn_package.setEnabled(True)
         self.btn_export.setEnabled(True)
+
