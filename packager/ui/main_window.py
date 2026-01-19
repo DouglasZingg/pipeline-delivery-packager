@@ -25,7 +25,7 @@ from packager.core.validator import validate_delivery
 from packager.core.planner import build_pack_plan
 from packager.core.pack import execute_pack
 from packager.core.manifest import build_manifest_dict, write_manifest_json
-
+from packager.core.reporting import build_report_html, write_report_html
 
 class PackWorker(QObject):
     progress = Signal(int, int, str)   # current, total, message
@@ -586,6 +586,43 @@ class MainWindow(QMainWindow):
 
         try:
             written = write_manifest_json(manifest, manifest_path)
+            # Also write HTML report (Day 8)
+            report_path = os.path.join(
+                output_path,
+                project,
+                asset,
+                version,
+                "docs",
+                "report.html",
+            )
+
+            hashes = getattr(self, "_last_hashes_by_src", {}) or {}
+            html_text = build_report_html(
+                tool_name="Pipeline Delivery Packager",
+                tool_version="1.0.0-dev",
+                profile=profile_name,
+                input_root=input_path,
+                output_root=output_path,
+                project=project,
+                asset_name=asset,
+                version=version,
+                validation_results=validation_results,
+                plan=self._last_plan,
+                hashes_by_src=hashes,
+                hash_algo="sha1",
+            )
+
+            try:
+                report_written = write_report_html(html_text, report_path)
+            except Exception as e:
+                self.add_result("ERROR", f"REPORT_WRITE_FAILED: {e}")
+                QMessageBox.critical(self, "Export Failed", f"Manifest wrote OK, but report failed:\n{e}")
+                return
+
+            self.add_result("INFO", f"Report written: {report_written}")
+            self.log(f"Report exported: {report_written}")
+            QMessageBox.information(self, "Export Complete", f"Manifest:\n{written}\n\nReport:\n{report_written}")
+
         except Exception as e:
             self.add_result("ERROR", f"MANIFEST_WRITE_FAILED: {e}")
             QMessageBox.critical(self, "Export Failed", f"Failed to write manifest:\n{e}")
