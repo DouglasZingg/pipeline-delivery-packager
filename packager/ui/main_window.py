@@ -29,7 +29,7 @@ from packager.core.manifest import build_manifest_dict, write_manifest_json
 
 class PackWorker(QObject):
     progress = Signal(int, int, str)   # current, total, message
-    finished = Signal(object, object)  # summary, issues
+    finished = Signal(object, object, object)  # summary, issues
 
     def __init__(self, plan, overwrite=False):
         super().__init__()
@@ -48,13 +48,15 @@ class PackWorker(QObject):
             msg = f"{i}/{total}  {item.relpath} -> {item.category}/"
             self.progress.emit(i, total, msg)
 
-        summary, issues = execute_pack(
+        summary, issues, hashes_by_src = execute_pack(
             plan=self.plan,
             overwrite=self.overwrite,
             progress_cb=_progress,
             is_cancelled=_is_cancelled,
+            verify_hash=True,
+            hash_algo="sha1",
         )
-        self.finished.emit(summary, issues)
+        self.finished.emit(summary, issues, hashes_by_src)
 
 
 class MainWindow(QMainWindow):
@@ -70,6 +72,7 @@ class MainWindow(QMainWindow):
         self._last_validation = []
         self._pack_thread = None
         self._pack_worker = None
+        self._last_hashes_by_src = {}
 
         # --- Root widget
         root = QWidget()
@@ -503,7 +506,7 @@ class MainWindow(QMainWindow):
         if pct % 10 == 0 or current == 1 or current == total:
             self.log(message)
 
-    def _on_pack_finished(self, summary, issues):
+    def _on_pack_finished(self, summary, issues, hashes_by_src):
         self.btn_cancel.setEnabled(False)
 
         # Unlock buttons
@@ -513,6 +516,8 @@ class MainWindow(QMainWindow):
         self.btn_export.setEnabled(True)
 
         self.add_result("INFO", f"Pack done: copied={summary.copied}, skipped={summary.skipped}, failed={summary.failed}")
+
+        self._last_hashes_by_src = hashes_by_src or {}
 
         if issues:
             def _pri(i):
@@ -548,6 +553,7 @@ class MainWindow(QMainWindow):
         asset = self.asset_edit.text().strip()
         version = self.version_edit.text().strip()
         profile_name = self.profile_combo.currentText()
+        hashes = getattr(self, "_last_hashes_by_src", {}) or {}
 
         # Destination for manifest inside delivery drop
         manifest_path = os.path.join(
@@ -574,6 +580,8 @@ class MainWindow(QMainWindow):
             validation_results=validation_results,
             plan=self._last_plan,
             include_file_stats=True,
+            hashes_by_src=hashes,
+            hash_algo="sha1",
         )
 
         try:

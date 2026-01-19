@@ -4,9 +4,10 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from packager.models import PackPlanItem, ValidationResult
+from packager.core.hashing import hash_file
 
 
 @dataclass(frozen=True)
@@ -20,7 +21,7 @@ class PackSummary:
 def _same_file(src: str, dst: str) -> bool:
     """
     Best-effort check to see if dst already matches src (size + mtime).
-    Not cryptographic; Day 7 adds hashing.
+    Not cryptographic; Day 7 hashing is the real integrity check.
     """
     try:
         s = os.stat(src)
@@ -36,16 +37,21 @@ def execute_pack(
     overwrite: bool = False,
     progress_cb: Optional[Callable[[int, int, PackPlanItem], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
-) -> Tuple[PackSummary, List[ValidationResult]]:
+    verify_hash: bool = True,
+    hash_algo: str = "sha1",
+) -> Tuple[PackSummary, List[ValidationResult], Dict[str, str]]:
     """
-    Copies files according to plan (safe-copy, never move).
-    - overwrite=False: if destination exists, we SKIP (unless it appears identical, then also SKIP).
-    - overwrite=True: always copy over existing destination.
+    Copies files according to plan (safe-copy, never move) and optionally verifies via hashes.
 
-    progress_cb(current_index_1based, total, item)
-    is_cancelled() -> True to abort
+    Returns:
+      (summary, issues, hashes_by_src)
+
+    hashes_by_src maps source absolute path -> hash digest
+    (used later in manifest export).
     """
     issues: List[ValidationResult] = []
+    hashes_by_src: Dict[str, str] = {}
+
     total = len(plan)
     copied = 0
     skipped = 0
@@ -81,6 +87,24 @@ def execute_pack(
             )
             continue
 
+        # Precompute src hash (if enabled) so we can store it + compare after copy
+        src_hash = None
+        if verify_hash:
+            try:
+                src_hash = hash_file(str(src), algo=hash_algo)  # type: ignore[arg-type]
+                hashes_by_src[str(src)] = src_hash
+            except OSError as e:
+                failed += 1
+                issues.append(
+                    ValidationResult(
+                        "ERROR",
+                        "HASH_SRC_FAILED",
+                        f"Failed hashing source: {src} ({e})",
+                        item.relpath,
+                    )
+                )
+                continue
+
         try:
             dst.parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -95,22 +119,22 @@ def execute_pack(
             )
             continue
 
-        if dst.exists():
-            if not overwrite:
-                # If it's effectively the same, skip silently; otherwise warn and skip.
-                if _same_file(str(src), str(dst)):
-                    skipped += 1
-                    continue
+        if dst.exists() and not overwrite:
+            # Skip if overwrite disabled
+            if _same_file(str(src), str(dst)):
                 skipped += 1
-                issues.append(
-                    ValidationResult(
-                        "WARNING",
-                        "DST_EXISTS_SKIPPED",
-                        f"Destination exists; skipped (overwrite disabled): {dst}",
-                        item.relpath,
-                    )
-                )
                 continue
+
+            skipped += 1
+            issues.append(
+                ValidationResult(
+                    "WARNING",
+                    "DST_EXISTS_SKIPPED",
+                    f"Destination exists; skipped (overwrite disabled): {dst}",
+                    item.relpath,
+                )
+            )
+            continue
 
         try:
             shutil.copy2(src, dst)
@@ -125,6 +149,34 @@ def execute_pack(
                     item.relpath,
                 )
             )
+            continue
+
+        # Verify after copy
+        if verify_hash and src_hash is not None:
+            try:
+                dst_hash = hash_file(str(dst), algo=hash_algo)  # type: ignore[arg-type]
+            except OSError as e:
+                failed += 1
+                issues.append(
+                    ValidationResult(
+                        "ERROR",
+                        "HASH_DST_FAILED",
+                        f"Failed hashing destination: {dst} ({e})",
+                        item.relpath,
+                    )
+                )
+                continue
+
+            if dst_hash != src_hash:
+                failed += 1
+                issues.append(
+                    ValidationResult(
+                        "ERROR",
+                        "HASH_MISMATCH",
+                        f"Integrity check failed (src != dst) for: {dst.name}",
+                        item.relpath,
+                    )
+                )
 
     summary = PackSummary(total=total, copied=copied, skipped=skipped, failed=failed)
-    return summary, issues
+    return summary, issues, hashes_by_src

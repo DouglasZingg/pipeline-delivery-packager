@@ -37,6 +37,8 @@ def build_manifest_dict(
     validation_results: List[ValidationResult],
     plan: List[PackPlanItem],
     include_file_stats: bool = True,
+    hashes_by_src: Optional[Dict[str, str]] = None,
+    hash_algo: str = "sha1",
 ) -> Dict[str, Any]:
     files_out: List[Dict[str, Any]] = []
     for item in plan:
@@ -48,6 +50,9 @@ def build_manifest_dict(
         }
         if include_file_stats:
             entry.update(_safe_stat(item.src))
+        if hashes_by_src and item.src in hashes_by_src:
+            entry["hash"] = hashes_by_src[item.src]
+            entry["hash_algo"] = hash_algo
         files_out.append(entry)
 
     results_out = [

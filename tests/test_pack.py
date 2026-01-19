@@ -30,11 +30,13 @@ class TestPack(unittest.TestCase):
                 )
             ]
 
-            summary, issues = execute_pack(plan, overwrite=False)
+            summary, issues, hashes = execute_pack(plan, overwrite=False)
             self.assertEqual(summary.copied, 1)
             self.assertTrue(Path(dst_file).exists())
             self.assertEqual(Path(dst_file).read_bytes(), b"dummydata")
             self.assertFalse(any(i.level.upper() == "ERROR" for i in issues))
+            self.assertIn(str(src_file), hashes)
+            self.assertTrue(len(hashes[str(src_file)]) >= 32)
 
     def test_execute_pack_skips_existing_when_no_overwrite(self):
         with tempfile.TemporaryDirectory() as tin, tempfile.TemporaryDirectory() as tout:
@@ -57,11 +59,13 @@ class TestPack(unittest.TestCase):
                 )
             ]
 
-            summary, issues = execute_pack(plan, overwrite=False)
+            summary, issues, hashes = execute_pack(plan, overwrite=False)
             self.assertEqual(summary.copied, 0)
             self.assertEqual(summary.skipped, 1)
             self.assertEqual(dst_file.read_text(), "existing")
             self.assertTrue(any(i.code == "DST_EXISTS_SKIPPED" for i in issues))
+            self.assertIn(str(src_file), hashes)
+            self.assertTrue(len(hashes[str(src_file)]) >= 32)
 
 if __name__ == "__main__":
     unittest.main()
