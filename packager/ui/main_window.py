@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QObject, QThread, Signal
 from PySide6.QtWidgets import (
@@ -17,10 +18,18 @@ from PySide6.QtWidgets import (
     QSplitter,
     QMessageBox,
     QProgressBar,
+    QCheckBox
 )
 
 from packager.core.scanner import scan_folder
-from packager.core.profiles import get_profile
+from packager.core.profiles import (
+    ensure_default_profiles_on_disk,
+    load_profile,
+    save_profile,
+    default_profiles,
+    ProfileConfig,
+    ProfileRules,
+)
 from packager.core.validator import validate_delivery
 from packager.core.planner import build_pack_plan
 from packager.core.pack import execute_pack
@@ -172,6 +181,49 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(mid_row)
 
         # -------------------------
+        # Profile Editor (Day 9)
+        # -------------------------
+        self.profile_required_edit = QLineEdit()
+        self.profile_required_edit.setPlaceholderText("Required folders (comma-separated) e.g. geo, tex, export, source")
+
+        self.profile_allowed_edit = QLineEdit()
+        self.profile_allowed_edit.setPlaceholderText("Allowed extensions (comma-separated) e.g. fbx, png, ma, abc")
+
+        self.cb_no_spaces = QCheckBox("Enforce no spaces (ERROR)")
+        self.cb_version_warn = QCheckBox("Warn on missing version token")
+        self.cb_unsupported_warn = QCheckBox("Warn on unsupported extensions")
+        self.cb_missing_folders_error = QCheckBox("Missing required folders is ERROR")
+
+        prof_btn_row = QHBoxLayout()
+        self.btn_profile_reload = QPushButton("Reload Profile")
+        self.btn_profile_reload.clicked.connect(self.on_reload_profile_clicked)
+
+        self.btn_profile_save = QPushButton("Save Profile")
+        self.btn_profile_save.clicked.connect(self.on_save_profile_clicked)
+
+        prof_btn_row.addWidget(self.btn_profile_reload)
+        prof_btn_row.addWidget(self.btn_profile_save)
+        prof_btn_row.addStretch(1)
+
+        prof_edit_layout = QVBoxLayout()
+        prof_edit_layout.addWidget(QLabel("Profile Editor"))
+        prof_edit_layout.addWidget(self.profile_required_edit)
+        prof_edit_layout.addWidget(self.profile_allowed_edit)
+
+        toggles_row = QHBoxLayout()
+        toggles_row.addWidget(self.cb_no_spaces)
+        toggles_row.addWidget(self.cb_version_warn)
+        toggles_row.addWidget(self.cb_unsupported_warn)
+        toggles_row.addWidget(self.cb_missing_folders_error)
+        toggles_row.addStretch(1)
+
+        prof_edit_layout.addLayout(toggles_row)
+        prof_edit_layout.addLayout(prof_btn_row)
+
+        main_layout.addLayout(prof_edit_layout)
+
+
+        # -------------------------
         # Progress + Cancel (Day 5)
         # -------------------------
         prog_row = QHBoxLayout()
@@ -237,6 +289,21 @@ class MainWindow(QMainWindow):
         self.log_box.setObjectName("log_box")
         self.progress.setObjectName("progress")
 
+        # Ensure default profiles exist on disk and load current selection into editor
+        repo_root = str(Path(__file__).resolve().parents[2])  # .../packager/ui/main_window.py -> repo root
+        self._repo_root = repo_root
+        ensure_default_profiles_on_disk(self._repo_root)
+
+        self.profile_combo.clear()
+        for name in ["Game", "VFX", "Mobile"]:
+            self.profile_combo.addItem(name)
+        self.profile_combo.setCurrentText("VFX")
+        self.profile_combo.currentTextChanged.connect(self.on_profile_changed)
+
+        self._active_profile = None
+        self.on_profile_changed(self.profile_combo.currentText())
+
+
     # -------------------------
     # UI Helpers
     # -------------------------
@@ -277,8 +344,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing Input", "Please choose a valid input folder.")
             return None, None
 
-        if not output_path or not os.path.isdir(output_path):
-            QMessageBox.warning(self, "Missing Output", "Please choose a valid output folder.")
+        if not output_path:
+            QMessageBox.warning(self, "Missing Output", "Please choose an output folder.")
+            return None, None
+
+        # Create output root if it doesn't exist (Day 9 hardening)
+        try:
+            os.makedirs(output_path, exist_ok=True)
+        except Exception as e:
+            QMessageBox.warning(self, "Output Error", f"Could not create output folder:\n{e}")
             return None, None
 
         return input_path, output_path
@@ -309,6 +383,10 @@ class MainWindow(QMainWindow):
             return
 
         profile_name = self.profile_combo.currentText()
+        profile = self._active_profile
+        if profile is None:
+            self.on_profile_changed(profile_name)
+            profile = self._active_profile
 
         self.log("---- SCAN START ----")
         self.log(f"Profile: {profile_name}")
@@ -329,7 +407,17 @@ class MainWindow(QMainWindow):
         self.add_result("INFO", f"Scan OK: {summary.total_files} files in {summary.total_dirs} folders ({mb:.2f} MB)")
         self.add_result("INFO", f"Unique extensions: {len(summary.extensions)}")
 
-        profile = get_profile(profile_name)
+        profile = self._active_profile
+        if profile is None:
+            self.on_profile_changed(profile_name)
+            profile = self._active_profile
+
+        profile_name = self.profile_combo.currentText()
+
+        # Force profile to match editor toggles
+        self._active_profile = self._read_profile_from_editor()
+        profile = self._active_profile
+
         validation_results = validate_delivery(
             input_root=input_path,
             files=files,
@@ -400,7 +488,10 @@ class MainWindow(QMainWindow):
             self._last_files = files
             self._last_summary = summary
             profile_name = self.profile_combo.currentText()
-            profile = get_profile(profile_name)
+            profile = self._active_profile
+            if profile is None:
+                self.on_profile_changed(profile_name)
+                profile = self._active_profile
             self._last_validation = validate_delivery(
                 input_root=input_path,
                 files=files,
@@ -631,3 +722,57 @@ class MainWindow(QMainWindow):
         self.add_result("INFO", f"Manifest written: {written}")
         self.log(f"Manifest exported: {written}")
         QMessageBox.information(self, "Export Complete", f"Manifest exported:\n{written}")
+
+    def on_profile_changed(self, name: str):
+        try:
+            prof = load_profile(self._repo_root, name)
+        except Exception:
+            # fallback to defaults if disk load fails
+            prof = default_profiles().get(name, list(default_profiles().values())[0])
+
+        self._active_profile = prof
+        self._apply_profile_to_editor(prof)
+        self.log(f"Profile loaded: {prof.name}")
+
+    def _apply_profile_to_editor(self, prof: ProfileConfig):
+        self.profile_required_edit.setText(", ".join(prof.required_folders))
+        self.profile_allowed_edit.setText(", ".join(sorted(prof.allowed_extensions)))
+
+        self.cb_no_spaces.setChecked(bool(prof.rules.enforce_no_spaces))
+        self.cb_version_warn.setChecked(bool(prof.rules.warn_missing_version_token))
+        self.cb_unsupported_warn.setChecked(bool(prof.rules.warn_unsupported_extensions))
+        self.cb_missing_folders_error.setChecked(bool(prof.rules.error_missing_required_folders))
+
+    def _read_profile_from_editor(self) -> ProfileConfig:
+        name = self.profile_combo.currentText().strip() or "Custom"
+
+        required = [x.strip().strip("/\\") for x in self.profile_required_edit.text().split(",") if x.strip()]
+        allowed = {x.strip().lower().lstrip(".") for x in self.profile_allowed_edit.text().split(",") if x.strip()}
+
+        rules = ProfileRules(
+            enforce_no_spaces=self.cb_no_spaces.isChecked(),
+            warn_missing_version_token=self.cb_version_warn.isChecked(),
+            warn_unsupported_extensions=self.cb_unsupported_warn.isChecked(),
+            error_missing_required_folders=self.cb_missing_folders_error.isChecked(),
+        )
+
+        return ProfileConfig(
+            name=name,
+            required_folders=required,
+            allowed_extensions=allowed,
+            rules=rules,
+        )
+
+    def on_reload_profile_clicked(self):
+        self.on_profile_changed(self.profile_combo.currentText())
+
+    def on_save_profile_clicked(self):
+        prof = self._read_profile_from_editor()
+        try:
+            path = save_profile(self._repo_root, prof)
+        except Exception as e:
+            QMessageBox.critical(self, "Save Failed", str(e))
+            return
+        self._active_profile = prof
+        self.add_result("INFO", f"Profile saved: {path}")
+        self.log(f"Profile saved: {path}")

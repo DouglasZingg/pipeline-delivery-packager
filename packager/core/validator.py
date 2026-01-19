@@ -4,13 +4,14 @@ import os
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set
 
 from packager.core.scanner import ScanFile, ScanSummary
 from packager.core.profiles import ProfileConfig
 from packager.models import ValidationResult
 
 
+# Matches v001 / _v001 / -v001 / .v001 etc.
 _VERSION_RE = re.compile(r"(^|[_\-.])v(\d{3,4})($|[_\-.])", re.IGNORECASE)
 
 
@@ -24,7 +25,7 @@ def validate_delivery(
     root_path = Path(input_root)
 
     # -------------------------
-    # Rule: Required folders
+    # Rule: Required folders exist (profile-based)
     # -------------------------
     existing_top: Set[str] = set()
     try:
@@ -32,8 +33,6 @@ def validate_delivery(
             if p.is_dir():
                 existing_top.add(p.name)
     except OSError:
-        # If we can't read root, scanner would likely have failed earlier,
-        # but keep this defensive.
         results.append(
             ValidationResult(
                 level="ERROR",
@@ -44,11 +43,13 @@ def validate_delivery(
         )
         return results
 
+    # Missing required folders can be ERROR or WARNING depending on profile rules
+    missing_level = "ERROR" if profile.rules.error_missing_required_folders else "WARNING"
     for req in profile.required_folders:
         if req not in existing_top:
             results.append(
                 ValidationResult(
-                    level="ERROR",
+                    level=missing_level,
                     code="REQ_FOLDER_MISSING",
                     message=f"Required folder missing for {profile.name}: '{req}/'",
                     relpath=req + "/",
@@ -56,36 +57,35 @@ def validate_delivery(
             )
 
     # -------------------------
-    # Rule: No spaces in names (folders + files)
+    # Rule: No spaces in folder/file names
     # -------------------------
-    # Check top-level folders too
-    for d in existing_top:
-        if " " in d:
-            results.append(
-                ValidationResult(
-                    level="ERROR",
-                    code="SPACE_IN_DIRNAME",
-                    message=f"Folder name contains spaces: '{d}'",
-                    relpath=d + "/",
+    if profile.rules.enforce_no_spaces:
+        # Top-level folder names
+        for d in existing_top:
+            if " " in d:
+                results.append(
+                    ValidationResult(
+                        level="ERROR",
+                        code="SPACE_IN_DIRNAME",
+                        message=f"Folder name contains spaces: '{d}'",
+                        relpath=d + "/",
+                    )
                 )
-            )
 
-    for f in files:
-        if " " in f.name:
-            results.append(
-                ValidationResult(
-                    level="ERROR",
-                    code="SPACE_IN_FILENAME",
-                    message=f"File name contains spaces: '{f.name}'",
-                    relpath=f.relpath,
+        # File names + paths
+        for f in files:
+            if " " in f.name:
+                results.append(
+                    ValidationResult(
+                        level="ERROR",
+                        code="SPACE_IN_FILENAME",
+                        message=f"File name contains spaces: '{f.name}'",
+                        relpath=f.relpath,
+                    )
                 )
-            )
 
-        # Also catch spaces in intermediate folders via relpath
-        # (cheap check; avoids full per-dir enumeration)
-        if " " in f.relpath:
-            # If filename already reported, don't spam; only warn once per file
-            if " " not in f.name:
+            # Spaces in any parent folder component
+            if " " in f.relpath and " " not in f.name:
                 results.append(
                     ValidationResult(
                         level="ERROR",
@@ -96,54 +96,54 @@ def validate_delivery(
                 )
 
     # -------------------------
-    # Rule: Version token present (v001 / _v001 / -v001)
+    # Rule: Version token present (WARNING)
     # -------------------------
-    # We keep it as WARNING (assets sometimes include non-versioned docs).
-    for f in files:
-        # Skip obvious docs and logs from version enforcement
-        if f.ext in {"md", "txt", "pdf", "csv", "log"}:
-            continue
-        if not _VERSION_RE.search(f.name):
-            results.append(
-                ValidationResult(
-                    level="WARNING",
-                    code="VERSION_TOKEN_MISSING",
-                    message="Filename missing version token (e.g. v001 or _v001).",
-                    relpath=f.relpath,
+    if profile.rules.warn_missing_version_token:
+        # Skip obvious docs/logs from version enforcement
+        skip_exts = {"md", "txt", "pdf", "csv", "log"}
+        for f in files:
+            if f.ext in skip_exts:
+                continue
+
+            if not _VERSION_RE.search(f.name):
+                results.append(
+                    ValidationResult(
+                        level="WARNING",
+                        code="VERSION_TOKEN_MISSING",
+                        message="Filename missing version token (e.g. v001 or _v001).",
+                        relpath=f.relpath,
+                    )
                 )
-            )
 
     # -------------------------
-    # Rule: Unsupported extensions (profile allowlist)
+    # Rule: Unsupported extensions (WARNING)
     # -------------------------
-    # Files with no extension are suspicious.
-    for ext, count in summary.extensions.items():
-        if ext == "":
-            results.append(
-                ValidationResult(
-                    level="WARNING",
-                    code="NO_EXTENSION_FILES",
-                    message=f"{count} file(s) have no extension.",
-                    relpath=None,
+    if profile.rules.warn_unsupported_extensions:
+        for ext, count in summary.extensions.items():
+            if ext == "":
+                results.append(
+                    ValidationResult(
+                        level="WARNING",
+                        code="NO_EXTENSION_FILES",
+                        message=f"{count} file(s) have no extension.",
+                        relpath=None,
+                    )
                 )
-            )
-            continue
+                continue
 
-        if ext not in profile.allowed_extensions:
-            results.append(
-                ValidationResult(
-                    level="WARNING",
-                    code="UNSUPPORTED_EXTENSION",
-                    message=f"Extension '.{ext}' not in {profile.name} allowlist ({count} file(s)).",
-                    relpath=None,
+            if ext not in profile.allowed_extensions:
+                results.append(
+                    ValidationResult(
+                        level="WARNING",
+                        code="UNSUPPORTED_EXTENSION",
+                        message=f"Extension '.{ext}' not in {profile.name} allowlist ({count} file(s)).",
+                        relpath=None,
+                    )
                 )
-            )
 
     # -------------------------
-    # Rule: Potential collisions (duplicate file names, case-insensitive)
+    # Rule: Duplicate filename (case-insensitive) warning
     # -------------------------
-    # Later packaging will put files into buckets (textures/export/etc),
-    # but collisions are still valuable to flag early.
     name_map: Dict[str, List[str]] = defaultdict(list)
     for f in files:
         key = f.name.lower()
@@ -151,8 +151,6 @@ def validate_delivery(
 
     for key, relpaths in name_map.items():
         if len(relpaths) > 1:
-            # Error or warning? We'll use WARNING for now.
-            # In Day 4 packaging preview, collisions can become ERROR if they collide in same dest.
             results.append(
                 ValidationResult(
                     level="WARNING",
@@ -163,7 +161,7 @@ def validate_delivery(
             )
 
     # -------------------------
-    # Summary info (nice to include)
+    # Summary info
     # -------------------------
     results.append(
         ValidationResult(

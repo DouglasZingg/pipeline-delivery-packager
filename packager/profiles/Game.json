@@ -1,0 +1,37 @@
+{
+  "name": "Game",
+  "required_folders": [
+    "geo",
+    "tex",
+    "export",
+    "source"
+  ],
+  "allowed_extensions": [
+    "7z",
+    "exr",
+    "fbx",
+    "glb",
+    "gltf",
+    "jpeg",
+    "jpg",
+    "json",
+    "md",
+    "obj",
+    "pdf",
+    "png",
+    "tga",
+    "tif",
+    "tiff",
+    "txt",
+    "usd",
+    "usda",
+    "usdc",
+    "zip"
+  ],
+  "rules": {
+    "enforce_no_spaces": true,
+    "warn_missing_version_token": true,
+    "warn_unsupported_extensions": true,
+    "error_missing_required_folders": true
+  }
+}

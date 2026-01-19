@@ -1,0 +1,49 @@
+{
+  "name": "VFX",
+  "required_folders": [
+    "geo",
+    "tex",
+    "rig",
+    "cache",
+    "export",
+    "source",
+    "docs",
+    "sim"
+  ],
+  "allowed_extensions": [
+    "7z",
+    "abc",
+    "blend",
+    "csv",
+    "exr",
+    "fbx",
+    "hdr",
+    "jpeg",
+    "jpg",
+    "json",
+    "ma",
+    "max",
+    "mb",
+    "md",
+    "mtl",
+    "obj",
+    "pdf",
+    "png",
+    "rar",
+    "tga",
+    "tif",
+    "tiff",
+    "txt",
+    "usd",
+    "usda",
+    "usdc",
+    "xml",
+    "zip"
+  ],
+  "rules": {
+    "enforce_no_spaces": true,
+    "warn_missing_version_token": true,
+    "warn_unsupported_extensions": true,
+    "error_missing_required_folders": false
+  }
+}
