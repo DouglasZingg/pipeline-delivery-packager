@@ -1,5 +1,6 @@
 import os
-from PySide6.QtCore import Qt
+
+from PySide6.QtCore import Qt, QObject, QThread, Signal
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -15,18 +16,56 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QSplitter,
     QMessageBox,
+    QProgressBar,
 )
+
 from packager.core.scanner import scan_folder
 from packager.core.profiles import get_profile
 from packager.core.validator import validate_delivery
 from packager.core.planner import build_pack_plan
+from packager.core.pack import execute_pack
+
+
+class PackWorker(QObject):
+    progress = Signal(int, int, str)   # current, total, message
+    finished = Signal(object, object)  # summary, issues
+
+    def __init__(self, plan, overwrite=False):
+        super().__init__()
+        self.plan = plan
+        self.overwrite = overwrite
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        def _is_cancelled():
+            return self._cancelled
+
+        def _progress(i, total, item):
+            msg = f"{i}/{total}  {item.relpath} -> {item.category}/"
+            self.progress.emit(i, total, msg)
+
+        summary, issues = execute_pack(
+            plan=self.plan,
+            overwrite=self.overwrite,
+            progress_cb=_progress,
+            is_cancelled=_is_cancelled,
+        )
+        self.finished.emit(summary, issues)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Pipeline Delivery Packager (v0.1)")
-        self.setMinimumSize(980, 620)
+        self.setWindowTitle("Pipeline Delivery Packager (v0.5)")
+        self.setMinimumSize(1020, 680)
+
+        # State
+        self._last_plan = []
+        self._pack_thread = None
+        self._pack_worker = None
 
         # --- Root widget
         root = QWidget()
@@ -50,6 +89,20 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.input_edit, 1)
         input_row.addWidget(btn_input)
 
+        self.output_edit = QLineEdit()
+        self.output_edit.setPlaceholderText("Select output folder (delivery target)...")
+
+        btn_output = QPushButton("Browse...")
+        btn_output.clicked.connect(self.pick_output_folder)
+
+        output_row = QHBoxLayout()
+        output_row.addWidget(QLabel("Output:"))
+        output_row.addWidget(self.output_edit, 1)
+        output_row.addWidget(btn_output)
+
+        main_layout.addLayout(input_row)
+        main_layout.addLayout(output_row)
+
         # -------------------------
         # Project / Asset / Version
         # -------------------------
@@ -66,7 +119,7 @@ class MainWindow(QMainWindow):
         self.version_edit = QLineEdit()
         self.version_edit.setPlaceholderText("v001")
         self.version_edit.setText("v001")
-        self.version_edit.setMaximumWidth(110)
+        self.version_edit.setMaximumWidth(120)
 
         proj_row.addWidget(QLabel("Project:"))
         proj_row.addWidget(self.project_edit, 1)
@@ -76,21 +129,6 @@ class MainWindow(QMainWindow):
         proj_row.addWidget(self.version_edit)
 
         main_layout.addLayout(proj_row)
-
-
-        self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Select output folder (delivery target)...")
-
-        btn_output = QPushButton("Browse...")
-        btn_output.clicked.connect(self.pick_output_folder)
-
-        output_row = QHBoxLayout()
-        output_row.addWidget(QLabel("Output:"))
-        output_row.addWidget(self.output_edit, 1)
-        output_row.addWidget(btn_output)
-
-        main_layout.addLayout(input_row)
-        main_layout.addLayout(output_row)
 
         # -------------------------
         # Mid: Profile + buttons
@@ -109,19 +147,42 @@ class MainWindow(QMainWindow):
         self.btn_scan = QPushButton("Scan")
         self.btn_scan.clicked.connect(self.on_scan_clicked)
 
-        self.btn_package = QPushButton("Package")
-        self.btn_package.setEnabled(False)
-        self.btn_package.clicked.connect(self.on_package_preview_clicked)
+        self.btn_preview = QPushButton("Preview")
+        self.btn_preview.clicked.connect(self.on_preview_clicked)
+        self.btn_preview.setEnabled(True)
 
+        self.btn_package = QPushButton("Package")
+        self.btn_package.clicked.connect(self.on_package_execute_clicked)
+        self.btn_package.setEnabled(True)
 
         self.btn_export = QPushButton("Export Report")
-        self.btn_export.setEnabled(False)
+        self.btn_export.setEnabled(False)  # Day 6+
 
         mid_row.addWidget(self.btn_scan)
+        mid_row.addWidget(self.btn_preview)
         mid_row.addWidget(self.btn_package)
         mid_row.addWidget(self.btn_export)
 
         main_layout.addLayout(mid_row)
+
+        # -------------------------
+        # Progress + Cancel (Day 5)
+        # -------------------------
+        prog_row = QHBoxLayout()
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self.on_cancel_clicked)
+
+        prog_row.addWidget(QLabel("Progress:"))
+        prog_row.addWidget(self.progress, 1)
+        prog_row.addWidget(self.btn_cancel)
+
+        main_layout.addLayout(prog_row)
 
         # -------------------------
         # Bottom: Results + Logs
@@ -150,12 +211,25 @@ class MainWindow(QMainWindow):
 
         splitter.addWidget(results_panel)
         splitter.addWidget(logs_panel)
-        splitter.setSizes([560, 420])
+        splitter.setSizes([600, 420])
 
         main_layout.addWidget(splitter, 1)
 
-        # Seed with a friendly note
-        self.log("Ready. Choose folders and click Scan.")
+        self.log("Ready. Choose folders, then Scan / Preview / Package.")
+
+        # Optional: stable IDs (useful for UI tests later)
+        self.input_edit.setObjectName("input_edit")
+        self.output_edit.setObjectName("output_edit")
+        self.project_edit.setObjectName("project_edit")
+        self.asset_edit.setObjectName("asset_edit")
+        self.version_edit.setObjectName("version_edit")
+        self.btn_scan.setObjectName("btn_scan")
+        self.btn_preview.setObjectName("btn_preview")
+        self.btn_package.setObjectName("btn_package")
+        self.btn_cancel.setObjectName("btn_cancel")
+        self.results_list.setObjectName("results_list")
+        self.log_box.setObjectName("log_box")
+        self.progress.setObjectName("progress")
 
     # -------------------------
     # UI Helpers
@@ -164,9 +238,6 @@ class MainWindow(QMainWindow):
         self.log_box.appendPlainText(msg)
 
     def add_result(self, level: str, message: str):
-        """
-        Adds a result item with basic severity coloring.
-        """
         text = f"[{level}] {message}"
         item = QListWidgetItem(text)
 
@@ -180,7 +251,6 @@ class MainWindow(QMainWindow):
 
         self.results_list.addItem(item)
 
-
     def pick_input_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Input Folder")
         if folder:
@@ -193,48 +263,66 @@ class MainWindow(QMainWindow):
             self.output_edit.setText(os.path.normpath(folder))
             self.log(f"Output folder set: {folder}")
 
-    # -------------------------
-    # Buttons
-    # -------------------------
-    def on_scan_clicked(self):
-        self.results_list.clear()
-
+    def _require_paths(self):
         input_path = self.input_edit.text().strip()
         output_path = self.output_edit.text().strip()
-        profile_name = self.profile_combo.currentText()
 
         if not input_path or not os.path.isdir(input_path):
             QMessageBox.warning(self, "Missing Input", "Please choose a valid input folder.")
-            return
+            return None, None
 
         if not output_path or not os.path.isdir(output_path):
             QMessageBox.warning(self, "Missing Output", "Please choose a valid output folder.")
+            return None, None
+
+        return input_path, output_path
+
+    def _scan_current(self):
+        input_path, _ = self._require_paths()
+        if not input_path:
+            return None
+
+        ignore_dirs = {".git", "__pycache__", ".venv", "node_modules"}
+        files, summary = scan_folder(
+            input_path,
+            ignore_dirs=ignore_dirs,
+            ignore_hidden=True,
+            follow_symlinks=False,
+        )
+        return files, summary
+
+    # -------------------------
+    # Scan (Day 3)
+    # -------------------------
+    def on_scan_clicked(self):
+        self.results_list.clear()
+        self._last_plan = []
+
+        input_path, output_path = self._require_paths()
+        if not input_path:
             return
+
+        profile_name = self.profile_combo.currentText()
 
         self.log("---- SCAN START ----")
         self.log(f"Profile: {profile_name}")
         self.log(f"Input:   {input_path}")
         self.log(f"Output:  {output_path}")
 
-        ignore_dirs = {".git", "__pycache__", ".venv", "node_modules"}
         try:
-            files, summary = scan_folder(
-                input_path,
-                ignore_dirs=ignore_dirs,
-                ignore_hidden=True,
-                follow_symlinks=False,
-            )
+            scanned = self._scan_current()
+            if not scanned:
+                return
+            files, summary = scanned
         except Exception as e:
             self.add_result("ERROR", f"Scan failed: {e}")
             self.log(f"ERROR: {e}")
             return
 
-        # Scan header
         mb = summary.total_bytes / (1024 * 1024) if summary.total_bytes else 0.0
         self.add_result("INFO", f"Scan OK: {summary.total_files} files in {summary.total_dirs} folders ({mb:.2f} MB)")
         self.add_result("INFO", f"Unique extensions: {len(summary.extensions)}")
 
-        # Run validation (Day 3)
         profile = get_profile(profile_name)
         validation_results = validate_delivery(
             input_root=input_path,
@@ -243,17 +331,13 @@ class MainWindow(QMainWindow):
             profile=profile,
         )
 
-        # Count levels
         counts = {"ERROR": 0, "WARNING": 0, "INFO": 0}
         for r in validation_results:
             lvl = (r.level or "INFO").upper()
-            if lvl not in counts:
-                counts[lvl] = 0
-            counts[lvl] += 1
+            counts[lvl] = counts.get(lvl, 0) + 1
 
         self.add_result("INFO", f"Validation: {counts.get('ERROR', 0)} error(s), {counts.get('WARNING', 0)} warning(s)")
 
-        # Show issues first (errors, warnings), then infos
         def _sort_key(r):
             lvl = (r.level or "INFO").upper()
             pri = {"ERROR": 0, "WARNING": 1, "INFO": 2}.get(lvl, 3)
@@ -264,7 +348,6 @@ class MainWindow(QMainWindow):
             suffix = f" ({r.relpath})" if r.relpath else ""
             self.add_result(lvl, f"{r.code}: {r.message}{suffix}")
 
-        # Keep some Day 2 extension info (top 8) for quick visibility
         self.add_result("INFO", "Top extensions:")
         shown = 0
         for ext, count in summary.extensions.items():
@@ -277,46 +360,32 @@ class MainWindow(QMainWindow):
             self.add_result("INFO", f"  - {label}: {count}")
             shown += 1
 
-        self.log(f"Scanned {len(files)} files; validated {len(validation_results)} rule result(s).")
+        self.log(f"Scanned {len(files)} files; validated {len(validation_results)} result(s).")
         self.log("---- SCAN DONE ----")
 
-        # Enable next buttons later
-        self.btn_package.setEnabled(True)
-        self.btn_export.setEnabled(True)
-
-    def on_package_preview_clicked(self):
-        """
-        Day 4: Dry-run packaging preview. No copying yet.
-        """
+    # -------------------------
+    # Preview (Day 4)
+    # -------------------------
+    def on_preview_clicked(self):
         self.results_list.clear()
+        self._last_plan = []
 
-        input_path = self.input_edit.text().strip()
-        output_path = self.output_edit.text().strip()
+        input_path, output_path = self._require_paths()
+        if not input_path:
+            return
 
         project = self.project_edit.text().strip()
         asset = self.asset_edit.text().strip()
         version = self.version_edit.text().strip()
 
-        if not input_path or not os.path.isdir(input_path):
-            QMessageBox.warning(self, "Missing Input", "Please choose a valid input folder.")
-            return
-        if not output_path or not os.path.isdir(output_path):
-            QMessageBox.warning(self, "Missing Output", "Please choose a valid output folder.")
-            return
-
-        self.log("---- PACKAGE PREVIEW START ----")
+        self.log("---- PREVIEW START ----")
         self.log(f"Project: {project} | Asset: {asset} | Version: {version}")
 
-        ignore_dirs = {".git", "__pycache__", ".venv", "node_modules"}
-
-        # Re-scan to ensure preview reflects current disk state
         try:
-            files, summary = scan_folder(
-                input_path,
-                ignore_dirs=ignore_dirs,
-                ignore_hidden=True,
-                follow_symlinks=False,
-            )
+            scanned = self._scan_current()
+            if not scanned:
+                return
+            files, summary = scanned
         except Exception as e:
             self.add_result("ERROR", f"Scan failed: {e}")
             self.log(f"ERROR: {e}")
@@ -330,7 +399,6 @@ class MainWindow(QMainWindow):
             version=version,
         )
 
-        # Show issues first
         err_count = sum(1 for i in issues if i.level.upper() == "ERROR")
         warn_count = sum(1 for i in issues if i.level.upper() == "WARNING")
         info_count = sum(1 for i in issues if i.level.upper() == "INFO")
@@ -342,11 +410,10 @@ class MainWindow(QMainWindow):
                 self.add_result(i.level, f"{i.code}: {i.message}{suffix}")
 
         if err_count > 0:
-            self.add_result("ERROR", "Preview blocked due to errors. Fix issues and try again.")
-            self.log("---- PACKAGE PREVIEW BLOCKED ----")
+            self.add_result("ERROR", "Preview blocked due to errors.")
+            self.log("---- PREVIEW BLOCKED ----")
             return
 
-        # Summarize plan
         by_cat = {}
         for item in plan:
             by_cat[item.category] = by_cat.get(item.category, 0) + 1
@@ -355,14 +422,96 @@ class MainWindow(QMainWindow):
         for cat, count in sorted(by_cat.items(), key=lambda kv: (-kv[1], kv[0])):
             self.add_result("INFO", f"  - {cat}: {count}")
 
-        # Show first N mappings
         self.add_result("INFO", "Sample mappings (first 20):")
         for item in plan[:20]:
             self.add_result("INFO", f"{item.relpath}  ->  {item.category}/")
-
         if len(plan) > 20:
             self.add_result("INFO", f"... +{len(plan) - 20} more")
 
-        self.log(f"Preview plan contains {len(plan)} items.")
-        self.log("---- PACKAGE PREVIEW DONE ----")
+        self._last_plan = plan
+        self.add_result("INFO", "Preview OK. Click Package to copy files.")
 
+        self.log(f"Preview plan contains {len(plan)} item(s).")
+        self.log("---- PREVIEW DONE ----")
+
+    # -------------------------
+    # Package execute (Day 5)
+    # -------------------------
+    def on_package_execute_clicked(self):
+        if not self._last_plan:
+            QMessageBox.information(
+                self,
+                "No Preview Plan",
+                "Click Preview first to generate a packaging plan (Day 4).",
+            )
+            return
+
+        if len(self._last_plan) == 0:
+            QMessageBox.information(self, "Empty Plan", "No files to package.")
+            return
+
+        self.progress.setValue(0)
+        self.btn_cancel.setEnabled(True)
+
+        # Lock buttons during pack
+        self.btn_scan.setEnabled(False)
+        self.btn_preview.setEnabled(False)
+        self.btn_package.setEnabled(False)
+        self.btn_export.setEnabled(False)
+
+        self.log("---- PACKAGING START ----")
+        self.add_result("INFO", f"Packaging {len(self._last_plan)} file(s)...")
+
+        self._pack_thread = QThread()
+        self._pack_worker = PackWorker(self._last_plan, overwrite=False)
+        self._pack_worker.moveToThread(self._pack_thread)
+
+        self._pack_thread.started.connect(self._pack_worker.run)
+        self._pack_worker.progress.connect(self._on_pack_progress)
+        self._pack_worker.finished.connect(self._on_pack_finished)
+
+        # Cleanup
+        self._pack_worker.finished.connect(self._pack_thread.quit)
+        self._pack_worker.finished.connect(self._pack_worker.deleteLater)
+        self._pack_thread.finished.connect(self._pack_thread.deleteLater)
+
+        self._pack_thread.start()
+
+    def _on_pack_progress(self, current: int, total: int, message: str):
+        pct = int((current / max(total, 1)) * 100)
+        self.progress.setValue(pct)
+        # Keep log readable
+        if pct % 10 == 0 or current == 1 or current == total:
+            self.log(message)
+
+    def _on_pack_finished(self, summary, issues):
+        self.btn_cancel.setEnabled(False)
+
+        # Unlock buttons
+        self.btn_scan.setEnabled(True)
+        self.btn_preview.setEnabled(True)
+        self.btn_package.setEnabled(True)
+        self.btn_export.setEnabled(True)
+
+        self.add_result("INFO", f"Pack done: copied={summary.copied}, skipped={summary.skipped}, failed={summary.failed}")
+
+        if issues:
+            def _pri(i):
+                lvl = i.level.upper()
+                return {"ERROR": 0, "WARNING": 1, "INFO": 2}.get(lvl, 3)
+
+            for i in sorted(issues, key=_pri):
+                suffix = f" ({i.relpath})" if i.relpath else ""
+                self.add_result(i.level, f"{i.code}: {i.message}{suffix}")
+
+        # If everything copied cleanly, push progress to 100
+        if summary.failed == 0:
+            self.progress.setValue(100)
+
+        self.log("---- PACKAGING DONE ----")
+
+    def on_cancel_clicked(self):
+        if self._pack_worker:
+            self._pack_worker.cancel()
+            self.log("Cancel requested...")
+            self.add_result("WARNING", "Cancel requested...")
