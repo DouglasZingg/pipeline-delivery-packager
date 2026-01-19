@@ -17,6 +17,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 from packager.core.scanner import scan_folder
+from packager.core.profiles import get_profile
+from packager.core.validator import validate_delivery
 
 
 class MainWindow(QMainWindow):
@@ -168,7 +170,7 @@ class MainWindow(QMainWindow):
 
         input_path = self.input_edit.text().strip()
         output_path = self.output_edit.text().strip()
-        profile = self.profile_combo.currentText()
+        profile_name = self.profile_combo.currentText()
 
         if not input_path or not os.path.isdir(input_path):
             QMessageBox.warning(self, "Missing Input", "Please choose a valid input folder.")
@@ -179,11 +181,10 @@ class MainWindow(QMainWindow):
             return
 
         self.log("---- SCAN START ----")
-        self.log(f"Profile: {profile}")
+        self.log(f"Profile: {profile_name}")
         self.log(f"Input:   {input_path}")
         self.log(f"Output:  {output_path}")
 
-        # Day 2: real scan
         ignore_dirs = {".git", "__pycache__", ".venv", "node_modules"}
         try:
             files, summary = scan_folder(
@@ -197,16 +198,46 @@ class MainWindow(QMainWindow):
             self.log(f"ERROR: {e}")
             return
 
-        # Header results
+        # Scan header
         mb = summary.total_bytes / (1024 * 1024) if summary.total_bytes else 0.0
         self.add_result("INFO", f"Scan OK: {summary.total_files} files in {summary.total_dirs} folders ({mb:.2f} MB)")
         self.add_result("INFO", f"Unique extensions: {len(summary.extensions)}")
 
-        # Extensions list (top 12)
+        # Run validation (Day 3)
+        profile = get_profile(profile_name)
+        validation_results = validate_delivery(
+            input_root=input_path,
+            files=files,
+            summary=summary,
+            profile=profile,
+        )
+
+        # Count levels
+        counts = {"ERROR": 0, "WARNING": 0, "INFO": 0}
+        for r in validation_results:
+            lvl = (r.level or "INFO").upper()
+            if lvl not in counts:
+                counts[lvl] = 0
+            counts[lvl] += 1
+
+        self.add_result("INFO", f"Validation: {counts.get('ERROR', 0)} error(s), {counts.get('WARNING', 0)} warning(s)")
+
+        # Show issues first (errors, warnings), then infos
+        def _sort_key(r):
+            lvl = (r.level or "INFO").upper()
+            pri = {"ERROR": 0, "WARNING": 1, "INFO": 2}.get(lvl, 3)
+            return (pri, r.code, r.relpath or "")
+
+        for r in sorted(validation_results, key=_sort_key):
+            lvl = (r.level or "INFO").upper()
+            suffix = f" ({r.relpath})" if r.relpath else ""
+            self.add_result(lvl, f"{r.code}: {r.message}{suffix}")
+
+        # Keep some Day 2 extension info (top 8) for quick visibility
         self.add_result("INFO", "Top extensions:")
         shown = 0
         for ext, count in summary.extensions.items():
-            if shown >= 12:
+            if shown >= 8:
                 remaining = len(summary.extensions) - shown
                 if remaining > 0:
                     self.add_result("INFO", f"... +{remaining} more")
@@ -215,20 +246,11 @@ class MainWindow(QMainWindow):
             self.add_result("INFO", f"  - {label}: {count}")
             shown += 1
 
-        # Unsupported warning bucket
-        if summary.unsupported:
-            self.add_result("WARNING", "Unsupported / suspicious types found:")
-            for ext, count in list(summary.unsupported.items())[:12]:
-                self.add_result("WARNING", f"  - {ext}: {count}")
-            if len(summary.unsupported) > 12:
-                self.add_result("WARNING", f"... +{len(summary.unsupported) - 12} more")
-        else:
-            self.add_result("INFO", "No unsupported extensions detected (allowlist-based).")
-
-        self.log(f"Scanned {len(files)} files.")
+        self.log(f"Scanned {len(files)} files; validated {len(validation_results)} rule result(s).")
         self.log("---- SCAN DONE ----")
 
         # Enable next buttons later
         self.btn_package.setEnabled(True)
         self.btn_export.setEnabled(True)
+
 
