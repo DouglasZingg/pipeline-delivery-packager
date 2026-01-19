@@ -24,6 +24,7 @@ from packager.core.profiles import get_profile
 from packager.core.validator import validate_delivery
 from packager.core.planner import build_pack_plan
 from packager.core.pack import execute_pack
+from packager.core.manifest import build_manifest_dict, write_manifest_json
 
 
 class PackWorker(QObject):
@@ -64,6 +65,9 @@ class MainWindow(QMainWindow):
 
         # State
         self._last_plan = []
+        self._last_files = []
+        self._last_summary = None
+        self._last_validation = []
         self._pack_thread = None
         self._pack_worker = None
 
@@ -149,14 +153,13 @@ class MainWindow(QMainWindow):
 
         self.btn_preview = QPushButton("Preview")
         self.btn_preview.clicked.connect(self.on_preview_clicked)
-        self.btn_preview.setEnabled(True)
 
         self.btn_package = QPushButton("Package")
         self.btn_package.clicked.connect(self.on_package_execute_clicked)
-        self.btn_package.setEnabled(True)
 
         self.btn_export = QPushButton("Export Report")
-        self.btn_export.setEnabled(False)  # Day 6+
+        self.btn_export.setEnabled(False)  # enabled after Preview
+        self.btn_export.clicked.connect(self.on_export_manifest_clicked)
 
         mid_row.addWidget(self.btn_scan)
         mid_row.addWidget(self.btn_preview)
@@ -348,6 +351,10 @@ class MainWindow(QMainWindow):
             suffix = f" ({r.relpath})" if r.relpath else ""
             self.add_result(lvl, f"{r.code}: {r.message}{suffix}")
 
+        self._last_files = files
+        self._last_summary = summary
+        self._last_validation = validation_results
+
         self.add_result("INFO", "Top extensions:")
         shown = 0
         for ext, count in summary.extensions.items():
@@ -386,6 +393,17 @@ class MainWindow(QMainWindow):
             if not scanned:
                 return
             files, summary = scanned
+            # keep latest scan snapshot
+            self._last_files = files
+            self._last_summary = summary
+            profile_name = self.profile_combo.currentText()
+            profile = get_profile(profile_name)
+            self._last_validation = validate_delivery(
+                input_root=input_path,
+                files=files,
+                summary=summary,
+                profile=profile,
+            )
         except Exception as e:
             self.add_result("ERROR", f"Scan failed: {e}")
             self.log(f"ERROR: {e}")
@@ -429,6 +447,7 @@ class MainWindow(QMainWindow):
             self.add_result("INFO", f"... +{len(plan) - 20} more")
 
         self._last_plan = plan
+        self.btn_export.setEnabled(True)
         self.add_result("INFO", "Preview OK. Click Package to copy files.")
 
         self.log(f"Preview plan contains {len(plan)} item(s).")
@@ -515,3 +534,55 @@ class MainWindow(QMainWindow):
             self._pack_worker.cancel()
             self.log("Cancel requested...")
             self.add_result("WARNING", "Cancel requested...")
+
+    def on_export_manifest_clicked(self):
+        if not self._last_plan:
+            QMessageBox.information(self, "Nothing to Export", "Run Preview first so the tool has a packaging plan.")
+            return
+
+        input_path, output_path = self._require_paths()
+        if not input_path:
+            return
+
+        project = self.project_edit.text().strip()
+        asset = self.asset_edit.text().strip()
+        version = self.version_edit.text().strip()
+        profile_name = self.profile_combo.currentText()
+
+        # Destination for manifest inside delivery drop
+        manifest_path = os.path.join(
+            output_path,
+            project,
+            asset,
+            version,
+            "docs",
+            "manifest.json",
+        )
+
+        # Use latest validation snapshot (from Scan or Preview)
+        validation_results = self._last_validation or []
+
+        manifest = build_manifest_dict(
+            tool_name="Pipeline Delivery Packager",
+            tool_version="1.0.0-dev",
+            profile=profile_name,
+            input_root=input_path,
+            output_root=output_path,
+            project=project,
+            asset_name=asset,
+            version=version,
+            validation_results=validation_results,
+            plan=self._last_plan,
+            include_file_stats=True,
+        )
+
+        try:
+            written = write_manifest_json(manifest, manifest_path)
+        except Exception as e:
+            self.add_result("ERROR", f"MANIFEST_WRITE_FAILED: {e}")
+            QMessageBox.critical(self, "Export Failed", f"Failed to write manifest:\n{e}")
+            return
+
+        self.add_result("INFO", f"Manifest written: {written}")
+        self.log(f"Manifest exported: {written}")
+        QMessageBox.information(self, "Export Complete", f"Manifest exported:\n{written}")
