@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from packager.core.scanner import scan_folder
 from packager.core.profiles import get_profile
 from packager.core.validator import validate_delivery
+from packager.core.planner import build_pack_plan
 
 
 class MainWindow(QMainWindow):
@@ -48,6 +49,34 @@ class MainWindow(QMainWindow):
         input_row.addWidget(QLabel("Input:"))
         input_row.addWidget(self.input_edit, 1)
         input_row.addWidget(btn_input)
+
+        # -------------------------
+        # Project / Asset / Version
+        # -------------------------
+        proj_row = QHBoxLayout()
+
+        self.project_edit = QLineEdit()
+        self.project_edit.setPlaceholderText("ProjectName (e.g. MyShow / MyGame)")
+        self.project_edit.setText("ProjectName")
+
+        self.asset_edit = QLineEdit()
+        self.asset_edit.setPlaceholderText("AssetName (e.g. CrateA)")
+        self.asset_edit.setText("AssetName")
+
+        self.version_edit = QLineEdit()
+        self.version_edit.setPlaceholderText("v001")
+        self.version_edit.setText("v001")
+        self.version_edit.setMaximumWidth(110)
+
+        proj_row.addWidget(QLabel("Project:"))
+        proj_row.addWidget(self.project_edit, 1)
+        proj_row.addWidget(QLabel("Asset:"))
+        proj_row.addWidget(self.asset_edit, 1)
+        proj_row.addWidget(QLabel("Version:"))
+        proj_row.addWidget(self.version_edit)
+
+        main_layout.addLayout(proj_row)
+
 
         self.output_edit = QLineEdit()
         self.output_edit.setPlaceholderText("Select output folder (delivery target)...")
@@ -82,6 +111,8 @@ class MainWindow(QMainWindow):
 
         self.btn_package = QPushButton("Package")
         self.btn_package.setEnabled(False)
+        self.btn_package.clicked.connect(self.on_package_preview_clicked)
+
 
         self.btn_export = QPushButton("Export Report")
         self.btn_export.setEnabled(False)
@@ -253,4 +284,85 @@ class MainWindow(QMainWindow):
         self.btn_package.setEnabled(True)
         self.btn_export.setEnabled(True)
 
+    def on_package_preview_clicked(self):
+        """
+        Day 4: Dry-run packaging preview. No copying yet.
+        """
+        self.results_list.clear()
+
+        input_path = self.input_edit.text().strip()
+        output_path = self.output_edit.text().strip()
+
+        project = self.project_edit.text().strip()
+        asset = self.asset_edit.text().strip()
+        version = self.version_edit.text().strip()
+
+        if not input_path or not os.path.isdir(input_path):
+            QMessageBox.warning(self, "Missing Input", "Please choose a valid input folder.")
+            return
+        if not output_path or not os.path.isdir(output_path):
+            QMessageBox.warning(self, "Missing Output", "Please choose a valid output folder.")
+            return
+
+        self.log("---- PACKAGE PREVIEW START ----")
+        self.log(f"Project: {project} | Asset: {asset} | Version: {version}")
+
+        ignore_dirs = {".git", "__pycache__", ".venv", "node_modules"}
+
+        # Re-scan to ensure preview reflects current disk state
+        try:
+            files, summary = scan_folder(
+                input_path,
+                ignore_dirs=ignore_dirs,
+                ignore_hidden=True,
+                follow_symlinks=False,
+            )
+        except Exception as e:
+            self.add_result("ERROR", f"Scan failed: {e}")
+            self.log(f"ERROR: {e}")
+            return
+
+        plan, issues = build_pack_plan(
+            files=files,
+            output_root=output_path,
+            project=project,
+            asset=asset,
+            version=version,
+        )
+
+        # Show issues first
+        err_count = sum(1 for i in issues if i.level.upper() == "ERROR")
+        warn_count = sum(1 for i in issues if i.level.upper() == "WARNING")
+        info_count = sum(1 for i in issues if i.level.upper() == "INFO")
+
+        if issues:
+            self.add_result("INFO", f"Preview checks: {err_count} error(s), {warn_count} warning(s), {info_count} info")
+            for i in issues:
+                suffix = f" ({i.relpath})" if i.relpath else ""
+                self.add_result(i.level, f"{i.code}: {i.message}{suffix}")
+
+        if err_count > 0:
+            self.add_result("ERROR", "Preview blocked due to errors. Fix issues and try again.")
+            self.log("---- PACKAGE PREVIEW BLOCKED ----")
+            return
+
+        # Summarize plan
+        by_cat = {}
+        for item in plan:
+            by_cat[item.category] = by_cat.get(item.category, 0) + 1
+
+        self.add_result("INFO", f"Plan ready: {len(plan)} file(s) will be copied.")
+        for cat, count in sorted(by_cat.items(), key=lambda kv: (-kv[1], kv[0])):
+            self.add_result("INFO", f"  - {cat}: {count}")
+
+        # Show first N mappings
+        self.add_result("INFO", "Sample mappings (first 20):")
+        for item in plan[:20]:
+            self.add_result("INFO", f"{item.relpath}  ->  {item.category}/")
+
+        if len(plan) > 20:
+            self.add_result("INFO", f"... +{len(plan) - 20} more")
+
+        self.log(f"Preview plan contains {len(plan)} items.")
+        self.log("---- PACKAGE PREVIEW DONE ----")
 
