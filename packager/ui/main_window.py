@@ -35,10 +35,11 @@ from packager.core.planner import build_pack_plan
 from packager.core.pack import execute_pack
 from packager.core.manifest import build_manifest_dict, write_manifest_json
 from packager.core.reporting import build_report_html, write_report_html
+from packager.config import APP_NAME, APP_VERSION, HASH_ALGO_DEFAULT
 
 class PackWorker(QObject):
     progress = Signal(int, int, str)   # current, total, message
-    finished = Signal(object, object, object)  # summary, issues
+    finished = Signal(object, object, object)  # summary, issues, hashes_by_src
 
     def __init__(self, plan, overwrite=False):
         super().__init__()
@@ -71,7 +72,7 @@ class PackWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Pipeline Delivery Packager (v0.5)")
+        self.setWindowTitle(f"{APP_NAME} (v{APP_VERSION})")
         self.setMinimumSize(1020, 680)
 
         # State
@@ -382,11 +383,10 @@ class MainWindow(QMainWindow):
         if not input_path:
             return
 
-        profile_name = self.profile_combo.currentText()
+        # Always validate using the editor state (Day 9 behavior)
+        self._active_profile = self._read_profile_from_editor()
         profile = self._active_profile
-        if profile is None:
-            self.on_profile_changed(profile_name)
-            profile = self._active_profile
+        profile_name = profile.name
 
         self.log("---- SCAN START ----")
         self.log(f"Profile: {profile_name}")
@@ -406,17 +406,6 @@ class MainWindow(QMainWindow):
         mb = summary.total_bytes / (1024 * 1024) if summary.total_bytes else 0.0
         self.add_result("INFO", f"Scan OK: {summary.total_files} files in {summary.total_dirs} folders ({mb:.2f} MB)")
         self.add_result("INFO", f"Unique extensions: {len(summary.extensions)}")
-
-        profile = self._active_profile
-        if profile is None:
-            self.on_profile_changed(profile_name)
-            profile = self._active_profile
-
-        profile_name = self.profile_combo.currentText()
-
-        # Force profile to match editor toggles
-        self._active_profile = self._read_profile_from_editor()
-        profile = self._active_profile
 
         validation_results = validate_delivery(
             input_root=input_path,
@@ -442,6 +431,7 @@ class MainWindow(QMainWindow):
             suffix = f" ({r.relpath})" if r.relpath else ""
             self.add_result(lvl, f"{r.code}: {r.message}{suffix}")
 
+        # Store latest run snapshot (used for manifest/report)
         self._last_files = files
         self._last_summary = summary
         self._last_validation = validation_results
@@ -460,6 +450,7 @@ class MainWindow(QMainWindow):
 
         self.log(f"Scanned {len(files)} files; validated {len(validation_results)} result(s).")
         self.log("---- SCAN DONE ----")
+
 
     # -------------------------
     # Preview (Day 4)
@@ -484,14 +475,15 @@ class MainWindow(QMainWindow):
             if not scanned:
                 return
             files, summary = scanned
-            # keep latest scan snapshot
+
+            # Keep latest scan snapshot
             self._last_files = files
             self._last_summary = summary
-            profile_name = self.profile_combo.currentText()
+
+            # IMPORTANT: Preview uses editor state too (matches Scan)
+            self._active_profile = self._read_profile_from_editor()
             profile = self._active_profile
-            if profile is None:
-                self.on_profile_changed(profile_name)
-                profile = self._active_profile
+
             self._last_validation = validate_delivery(
                 input_root=input_path,
                 files=files,
@@ -547,15 +539,22 @@ class MainWindow(QMainWindow):
         self.log(f"Preview plan contains {len(plan)} item(s).")
         self.log("---- PREVIEW DONE ----")
 
+
     # -------------------------
     # Package execute (Day 5)
     # -------------------------
     def on_package_execute_clicked(self):
+        # If no plan, try to generate one automatically
+        if not self._last_plan:
+            self.log("No preview plan found. Auto-running Preview...")
+            self.on_preview_clicked()
+
+        # If still no plan, preview was blocked or produced nothing
         if not self._last_plan:
             QMessageBox.information(
                 self,
                 "No Preview Plan",
-                "Click Preview first to generate a packaging plan (Day 4).",
+                "Preview did not produce a valid plan. Check Results for Preview errors (collisions, missing inputs, etc.).",
             )
             return
 
@@ -563,10 +562,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Empty Plan", "No files to package.")
             return
 
+        # --- proceed with packaging exactly as before ---
         self.progress.setValue(0)
         self.btn_cancel.setEnabled(True)
 
-        # Lock buttons during pack
         self.btn_scan.setEnabled(False)
         self.btn_preview.setEnabled(False)
         self.btn_package.setEnabled(False)
@@ -583,12 +582,12 @@ class MainWindow(QMainWindow):
         self._pack_worker.progress.connect(self._on_pack_progress)
         self._pack_worker.finished.connect(self._on_pack_finished)
 
-        # Cleanup
         self._pack_worker.finished.connect(self._pack_thread.quit)
         self._pack_worker.finished.connect(self._pack_worker.deleteLater)
         self._pack_thread.finished.connect(self._pack_thread.deleteLater)
 
         self._pack_thread.start()
+
 
     def _on_pack_progress(self, current: int, total: int, message: str):
         pct = int((current / max(total, 1)) * 100)
@@ -644,20 +643,12 @@ class MainWindow(QMainWindow):
         asset = self.asset_edit.text().strip()
         version = self.version_edit.text().strip()
         profile_name = self.profile_combo.currentText()
+
         hashes = getattr(self, "_last_hashes_by_src", {}) or {}
-
-        # Destination for manifest inside delivery drop
-        manifest_path = os.path.join(
-            output_path,
-            project,
-            asset,
-            version,
-            "docs",
-            "manifest.json",
-        )
-
-        # Use latest validation snapshot (from Scan or Preview)
         validation_results = self._last_validation or []
+
+        manifest_path = os.path.join(output_path, project, asset, version, "docs", "manifest.json")
+        report_path = os.path.join(output_path, project, asset, version, "docs", "report.html")
 
         manifest = build_manifest_dict(
             tool_name="Pipeline Delivery Packager",
@@ -676,18 +667,8 @@ class MainWindow(QMainWindow):
         )
 
         try:
-            written = write_manifest_json(manifest, manifest_path)
-            # Also write HTML report (Day 8)
-            report_path = os.path.join(
-                output_path,
-                project,
-                asset,
-                version,
-                "docs",
-                "report.html",
-            )
+            written_manifest = write_manifest_json(manifest, manifest_path)
 
-            hashes = getattr(self, "_last_hashes_by_src", {}) or {}
             html_text = build_report_html(
                 tool_name="Pipeline Delivery Packager",
                 tool_version="1.0.0-dev",
@@ -702,26 +683,20 @@ class MainWindow(QMainWindow):
                 hashes_by_src=hashes,
                 hash_algo="sha1",
             )
-
-            try:
-                report_written = write_report_html(html_text, report_path)
-            except Exception as e:
-                self.add_result("ERROR", f"REPORT_WRITE_FAILED: {e}")
-                QMessageBox.critical(self, "Export Failed", f"Manifest wrote OK, but report failed:\n{e}")
-                return
-
-            self.add_result("INFO", f"Report written: {report_written}")
-            self.log(f"Report exported: {report_written}")
-            QMessageBox.information(self, "Export Complete", f"Manifest:\n{written}\n\nReport:\n{report_written}")
+            written_report = write_report_html(html_text, report_path)
 
         except Exception as e:
-            self.add_result("ERROR", f"MANIFEST_WRITE_FAILED: {e}")
-            QMessageBox.critical(self, "Export Failed", f"Failed to write manifest:\n{e}")
+            self.add_result("ERROR", f"EXPORT_FAILED: {e}")
+            QMessageBox.critical(self, "Export Failed", f"Export failed:\n{e}")
             return
 
-        self.add_result("INFO", f"Manifest written: {written}")
-        self.log(f"Manifest exported: {written}")
-        QMessageBox.information(self, "Export Complete", f"Manifest exported:\n{written}")
+        # Single success path (no double popup)
+        self.add_result("INFO", f"Manifest written: {written_manifest}")
+        self.add_result("INFO", f"Report written: {written_report}")
+        self.log(f"Manifest exported: {written_manifest}")
+        self.log(f"Report exported: {written_report}")
+        QMessageBox.information(self, "Export Complete", f"Manifest:\n{written_manifest}\n\nReport:\n{written_report}")
+
 
     def on_profile_changed(self, name: str):
         try:

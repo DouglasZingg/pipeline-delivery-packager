@@ -7,8 +7,7 @@
     "cache",
     "export",
     "source",
-    "docs",
-    "sim"
+    "docs"
   ],
   "allowed_extensions": [
     "7z",
@@ -44,6 +43,6 @@
     "enforce_no_spaces": true,
     "warn_missing_version_token": true,
     "warn_unsupported_extensions": true,
-    "error_missing_required_folders": false
+    "error_missing_required_folders": true
   }
 }

@@ -17,3 +17,7 @@ __pycache__/
 *.log
 dist/
 build/
+
+demo_drop/
+deliveries_test/
+*.spec
