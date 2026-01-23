@@ -21,7 +21,6 @@ class PackSummary:
 def _same_file(src: str, dst: str) -> bool:
     """
     Best-effort check to see if dst already matches src (size + mtime).
-    Not cryptographic; Day 7 hashing is the real integrity check.
     """
     try:
         s = os.stat(src)

@@ -96,8 +96,7 @@ def scan_folder(
             key = ext  # "" allowed
             ext_counts[key] = ext_counts.get(key, 0) + 1
 
-    # Basic unsupported warning group (Day 2 foundation)
-    # We'll refine this later with profiles/rules.
+    # Basic unsupported warning group
     allow = {
         # DCC / scene
         "ma", "mb", "max", "blend",

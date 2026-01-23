@@ -225,7 +225,7 @@ class MainWindow(QMainWindow):
 
 
         # -------------------------
-        # Progress + Cancel (Day 5)
+        # Progress + Cancel
         # -------------------------
         prog_row = QHBoxLayout()
 
@@ -276,7 +276,7 @@ class MainWindow(QMainWindow):
 
         self.log("Ready. Choose folders, then Scan / Preview / Package.")
 
-        # Optional: stable IDs (useful for UI tests later)
+        # Stable IDs (useful for UI tests)
         self.input_edit.setObjectName("input_edit")
         self.output_edit.setObjectName("output_edit")
         self.project_edit.setObjectName("project_edit")
@@ -349,7 +349,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Missing Output", "Please choose an output folder.")
             return None, None
 
-        # Create output root if it doesn't exist (Day 9 hardening)
+        # Create output root if it doesn't exist 
         try:
             os.makedirs(output_path, exist_ok=True)
         except Exception as e:
@@ -373,7 +373,7 @@ class MainWindow(QMainWindow):
         return files, summary
 
     # -------------------------
-    # Scan (Day 3)
+    # Scan 
     # -------------------------
     def on_scan_clicked(self):
         self.results_list.clear()
@@ -453,7 +453,7 @@ class MainWindow(QMainWindow):
 
 
     # -------------------------
-    # Preview (Day 4)
+    # Preview
     # -------------------------
     def on_preview_clicked(self):
         self.results_list.clear()
@@ -541,7 +541,7 @@ class MainWindow(QMainWindow):
 
 
     # -------------------------
-    # Package execute (Day 5)
+    # Package execute 
     # -------------------------
     def on_package_execute_clicked(self):
         # If no plan, try to generate one automatically

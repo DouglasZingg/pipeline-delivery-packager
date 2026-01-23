@@ -52,10 +52,6 @@ def validate_pack_inputs(project: str, asset: str, version: str) -> List[Validat
 
 
 def _category_for_file(f: ScanFile) -> str:
-    """
-    Simple categorization rules for Day 4.
-    Later well make this profile-aware and/or rule-driven.
-    """
     ext = (f.ext or "").lower()
 
     # Heuristic: if the relpath already indicates a bucket, respect it.

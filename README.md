@@ -1,47 +1,72 @@
-# Pipeline Delivery Packager (Standalone Python Pipeline Tool)
+# Pipeline Delivery Packager
 
-Standalone desktop pipeline utility that validates and packages asset deliveries into a clean “studio drop” layout, then exports a **manifest.json** + **report.html**.
+Standalone desktop pipeline utility that validates and packages an asset delivery into a clean “studio drop” layout, then exports a **manifest.json** and an **HTML report**.
 
-## What this proves (portfolio)
-- Standalone pipeline application (not tied to a DCC)
-- Rules-based scanning + validation
-- Production-style delivery packaging (safe-copy)
-- Collision detection + packaging plan preview
-- Integrity checks via hashing (SHA1)
-- Delivery documentation: manifest + HTML report
-- Unit tests + basic UI tests
-
-## Features (v1.0.0)
+## Features
 - Input/output folder selection
-- Profiles: Game / VFX / Mobile (JSON save/load)
-- Validation:
-  - required folders
-  - no spaces
-  - version token (v001)
-  - unsupported extensions
-  - duplicate filename warning
-- Preview: build a copy plan and catch destination collisions
-- Package: safe-copy with progress + cancel
-- Export:
+- Profiles (Game / VFX / Mobile)
+- Rules-based validation (INFO / WARNING / ERROR)
+- Packaging plan preview (detect destination collisions)
+- Package execution (safe-copy; never moves source files)
+- Exports:
   - `docs/manifest.json`
-  - `docs/report.html` (validation + plan + hashes)
+  - `docs/report.html`
 
-## Output layout
+## Output layout (example)
+```
 DELIVERY_ROOT/
-└── ProjectName/
-└── AssetName/
-└── v001/
-├── source/
-├── export/
-├── textures/
-├── docs/
-│ ├── manifest.json
-│ └── report.html
-└── logs/
+  ProjectName/
+    AssetName/
+      v001/
+        source/
+        export/
+        textures/
+        docs/
+          manifest.json
+          report.html
+        logs/
+```
 
-## Quick start
+## Quickstart (run the app)
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
+```
+
+## Demo / Testing Walkthrough (2–3 minutes)
+This repo includes a script that generates a fake “delivery drop” you can scan/package immediately.
+
+1) Create the demo input folder:
+```bash
+python scripts/make_demo_drop.py
+```
+This creates: `demo_drop/CrateA_drop`
+
+2) Launch the tool:
+```bash
+python main.py
+```
+
+3) In the UI:
+- **Input Folder** → select `demo_drop/CrateA_drop`
+- **Output Folder** → choose an empty folder (e.g. `C:\TEMP\delivery_out`)
+- Click **Scan**
+- Click **Preview Plan**
+- Click **Package**
+
+4) Verify output:
+- Open the output folder and confirm `docs/manifest.json` exists
+- Open `docs/report.html` in a browser
+
+## Tests (optional)
+```bash
+python -m pip install pytest
+pytest -q
+```
+
+## Troubleshooting
+See:
+- `docs/SETUP.md`
+- `docs/TROUBLESHOOTING.md`
